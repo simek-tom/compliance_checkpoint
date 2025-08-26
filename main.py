@@ -500,14 +500,15 @@ def render_summary():
         comp_percentile = None
         aw_percentile = None
 
-    with st.container(height=105, border=False):
+    with st.container(height=95, border=False):
         st.markdown(
-            "<h1 style='font-size:70px;font-family:Montserrat;"
-            "text-align:center;'>Souhrn výsledků</h1>",
+            "<div style='height:95px;overflow:hidden;display:flex;align-items:center;justify-content:center;'>"
+            "<h1 style='font-size:70px;font-family:Montserrat;margin:0;text-align:center;'>Souhrn výsledků</h1>"
+            "</div>",
             unsafe_allow_html=True
         )
     
-    with st.container(height=90, border=False):
+    with st.container(height=80, border=False):
         c1,c2 = st.columns(2)
         with c1:
             st.markdown(
@@ -526,7 +527,7 @@ def render_summary():
                 unsafe_allow_html=True
             )
     
-    with st.container(height=90, border=False):
+    with st.container(height=80, border=False):
         c1,c2 = st.columns(2)
         with c1:
             st.markdown(
@@ -547,16 +548,40 @@ def render_summary():
                 unsafe_allow_html=True
             )
     
-    st.markdown("---")
     
-    # Area breakdown
+
+    # Area breakdown rendered as a 3-column table with transparent borders
+    table_rows = []
     for area in df.area.unique():
-        mask = df.area==area
+        mask = df.area == area
         wf2 = df[mask].weight_fulfilled.sum() or 1
         wa2 = df[mask].weight_awareness.sum() or 1
-        c2 = (f[mask]*df[mask].weight_fulfilled).sum()/wf2*100
-        a2 = (av[mask]*df[mask].weight_awareness).sum()/wa2*100
-        st.write(f"**{area}** – Compliance {c2:.0f}%, Awareness {a2:.0f}%")
+        c2 = (f[mask] * df[mask].weight_fulfilled).sum() / wf2 * 100
+        a2 = (av[mask] * df[mask].weight_awareness).sum() / wa2 * 100
+        table_rows.append(
+            f"<tr>"
+            f"<td style='padding:8px 12px;font-weight:700;border:1px solid transparent;'>{area}</td>"
+            f"<td style='padding:8px 12px;text-align:right;border:1px solid transparent;min-width:110px;'>{c2:.0f}%</td>"
+            f"<td style='padding:8px 12px;text-align:right;border:1px solid transparent;min-width:110px;'>{a2:.0f}%</td>"
+            f"</tr>"
+        )
+
+    table_html = (
+        "<div style='max-width:900px;margin:0px auto;padding:12px;border-radius:8px;background:transparent;font-family:Montserrat,Arial,sans-serif;'>"
+        "<table style='width:100%;border-collapse:separate;border-spacing:0;'>"
+        "<thead>"
+        "<tr>"
+        "<th style='text-align:left;padding:8px 12px;border:1px solid transparent;'>Oblast</th>"
+        "<th style='text-align:right;padding:8px 12px;border:1px solid transparent;'>Compliance</th>"
+        "<th style='text-align:right;padding:8px 12px;border:1px solid transparent;'>Awareness</th>"
+        "</tr>"
+        "</thead>"
+        "<tbody>"
+        + "".join(table_rows)
+        + "</tbody></table></div>"
+    )
+
+    st.markdown(table_html, unsafe_allow_html=True)
     if st.button("Exportovat CSV", key="export_csv"):
         safe = slugify(st.session_state.company)
         now  = datetime.datetime.now()
