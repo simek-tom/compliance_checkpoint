@@ -212,3 +212,4 @@ questions_data/
 answers_logs/
 answers_per_company/
 cache/
+percentiles_log/
