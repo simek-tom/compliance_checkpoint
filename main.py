@@ -127,7 +127,7 @@ def render_title_page():
             for _ in range(12):
                 st.text("")
             st.image(
-                "progress_visual.svg",
+                "visuals/progress_visual.svg",
                 width=int(450*0.85)
             )
     if st.button("Začít audit"):
