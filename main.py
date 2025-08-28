@@ -37,13 +37,69 @@ if not QUESTIONS_PATH.exists():
 
 @st.cache_data
 def load_questions(p: Path) -> pd.DataFrame:
-    df = pd.read_csv(p, sep=";")
-    # normalize European commas
-    for col in ["weight_fulfilled","weight_awareness"]:
-        df[col] = df[col].astype(str).str.replace(",",".").astype(float)
+    # robust read: ; delimiter, utf-8-sig fallback
+    try:
+        df = pd.read_csv(p, sep=";", encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        df = pd.read_csv(p, sep=";", encoding="cp1250")
+
+    # Normalize European commas for weights
+    for col in ["weight_fulfilled", "weight_awareness"]:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                      .str.replace(",", ".", regex=False)
+                      .replace({"nan": np.nan})
+                      .astype(float)
+            )
+        else:
+            df[col] = 1.0
+
+    # Ensure expected core columns
+    if "area" not in df.columns:
+        df["area"] = "General"
+    if "question" not in df.columns:
+        raise ValueError("questions.csv must contain a 'question' column")
+
+    # New per-area numbering column -> string q_number for UI
+    if "area_question_number" in df.columns:
+        # keep numeric for sorting, also keep string for labels
+        df["area_question_number"] = pd.to_numeric(df["area_question_number"], errors="coerce")
+        df["q_number"] = df["area_question_number"].fillna(0).astype(int).astype(str)
+    else:
+        # fallback: generate running numbers within area
+        df["__row"] = np.arange(len(df))
+        df["q_number"] = (
+            df.sort_values(["area", "__row"])
+              .groupby("area")
+              .cumcount() + 1
+        ).astype(str)
+        df.drop(columns="__row", inplace=True, errors="ignore")
+
+    # Stable key used everywhere from now on
+    df["display_id"] = df["area"].astype(str).str.strip() + "-" + df["q_number"].astype(str)
+
+    # Sort by area + area_question_number (or q_number if area_question_number missing)
+    if "area_question_number" in df.columns:
+        df = df.sort_values(by=["area", "area_question_number"]).reset_index(drop=True)
+    else:
+        # natural sort for string q_number
+        def _natkey(s: str):
+            return [int(t) if t.isdigit() else t.lower() for t in re.findall(r"\d+|[^\d]+", str(s))]
+        df = df.sort_values(by=["area", "q_number"], key=lambda s: s.map(_natkey)).reset_index(drop=True)
+
+    # Warn on duplicates so mistakes surface early
+    dups = df["display_id"].duplicated(keep=False)
+    if dups.any():
+        st.warning(f"Duplicate display_id values: {sorted(df.loc[dups, 'display_id'].unique().tolist())}")
+
     return df
 
 questions_df = load_questions(QUESTIONS_PATH)
+
+st.session_state.display_to_global_idx = {
+    row.display_id: i for i, row in questions_df.reset_index().iterrows()
+}
 
 LOG_PATH = Path("audit_data") / "audit_scores_log.csv"
 @st.cache_data
@@ -156,6 +212,11 @@ def render_audit_mode():
                 "fulfilled": [np.nan] * len(questions_df),
                 "awareness": [np.nan] * len(questions_df)
             }).astype(float)
+
+            # NEW: rebuild lookup on the session copy
+            st.session_state.display_to_global_idx = {
+                row.display_id: i for i, row in st.session_state.global_questions.reset_index().iterrows()
+            }
             
             # Create cache file with company name
             safe = slugify(st.session_state.company)
@@ -193,12 +254,39 @@ def render_audit_mode():
                 
                 # Split the loaded data back into questions and answers
                 st.session_state.global_questions = loaded.drop(columns=["answer_fulfilled", "answer_awareness"] + 
-                                                               (["company_name"] if "company_name" in loaded.columns else []))
+                                               (["company_name"] if "company_name" in loaded.columns else []))
                 st.session_state.global_answers = pd.DataFrame({
                     "fulfilled": loaded["answer_fulfilled"],
                     "awareness": loaded["answer_awareness"]
                 }).astype(float)
-                
+
+                # Rebuild the lookup on the loaded dataset (supports older cache files)
+                # Ensure q_number exists for older cache files
+                if "q_number" not in st.session_state.global_questions.columns:
+                    if "area" in st.session_state.global_questions.columns:
+                        # generate 1..N within each area based on current order
+                        st.session_state.global_questions["__row"] = np.arange(len(st.session_state.global_questions))
+                        st.session_state.global_questions["q_number"] = (
+                            st.session_state.global_questions.sort_values(["area", "__row"])
+                            .groupby("area")
+                            .cumcount() + 1
+                        ).astype(str)
+                        st.session_state.global_questions.drop(columns="__row", inplace=True, errors="ignore")
+
+                # Ensure display_id exists
+                if "display_id" not in st.session_state.global_questions.columns:
+                    if "area" in st.session_state.global_questions.columns and "q_number" in st.session_state.global_questions.columns:
+                        st.session_state.global_questions["display_id"] = (
+                            st.session_state.global_questions["area"].astype(str).str.strip() + "-" +
+                            st.session_state.global_questions["q_number"].astype(str).str.strip()
+                        )
+
+                # Rebuild the lookup on the loaded dataset
+                st.session_state.display_to_global_idx = {
+                    row.display_id: i for i, row in st.session_state.global_questions.reset_index().iterrows()
+                }
+
+
                 st.session_state.cache_file = str(path)
                 st.session_state.page = 3
                 st.rerun()
@@ -208,44 +296,36 @@ def render_audit_mode():
 def render_area_menu():
     st.header("Vyberte oblast")
     
-    # Hardcoded areas (placeholders)
-    HARDCODED_AREAS = [
-        "BOZP & PO",
-        "ONBOARDING & OFFBOARDING",
-        "PRACOVNÍ DOBA &ČERPÁNÍ VOLNA",
-        "KANCELÁŘ",
-        "WHISTLEBLOWING",
-        "GDPR",
-        "ODMĚŇOVÁNÍ",
-        "KONTRAKTOŘI",
-        "FINANCE A ÚČETNICTVÍ",
-        "SLUŽEBNÍ CESTY A VÝDAJE"
-    ]
-    
+    # Dynamically derive areas from the loaded questions (preserve CSV order)
+    if "area" not in st.session_state.global_questions.columns or st.session_state.global_questions.empty:
+        st.warning("V datovém souboru nejsou žádné oblasti.")
+        return
+    areas = pd.Index(st.session_state.global_questions["area"].dropna()).unique().tolist()
+
     cols = st.columns(2)
-    for i, area in enumerate(HARDCODED_AREAS):
-        with cols[i%2]:
-            # Calculate scores for this area if it exists in dataframe
+    for i, area in enumerate(areas):
+        with cols[i % 2]:
+            # Calculate scores for this area
             mask = st.session_state.global_questions.area == area
             q = st.session_state.global_questions[mask]
-            a = st.session_state.global_answers[mask]
-            
-            if len(q) > 0:  # Area exists in dataframe
-                f = pd.to_numeric(a.fulfilled, errors="coerce").fillna(0)
+            a = st.session_state.global_answers[mask] if not st.session_state.global_answers.empty else pd.DataFrame()
+
+            if len(q) > 0 and not a.empty:
+                f  = pd.to_numeric(a.fulfilled, errors="coerce").fillna(0)
                 wf = q.weight_fulfilled.sum() or 1
                 comp = (f * q.weight_fulfilled).sum() / wf * 100
+
                 av = pd.to_numeric(a.awareness, errors="coerce").fillna(0)
                 wa = q.weight_awareness.sum() or 1
                 aw = (av * q.weight_awareness).sum() / wa * 100
-            else:  # Area doesn't exist in dataframe
+            else:
                 comp, aw = 0, 0
 
             with st.container(height=100, border=False):
                 btn = st.button(f"**{area}**", use_container_width=True,
                                 key=f"area_{slugify(area)}")
                 st.markdown(
-                    f"<div style='display:flex;align-items:center;"
-                    f"justify-content:center;height:30px;'>"
+                    f"<div style='display:flex;align-items:center;justify-content:center;height:30px;'>"
                     f"<div style='font-weight:700;'>Compliance: {comp:.0f}%</div>"
                     f"<div style='width:20px;'></div>"
                     f"<div style='font-weight:700;'>Awareness: {aw:.0f}%</div>"
@@ -254,15 +334,16 @@ def render_area_menu():
                 )
 
             if btn:
-                # Filter questions dataframe by selected area
+                # Filter questions dataframe by selected area (already sorted by load_questions)
                 filtered_questions = st.session_state.global_questions[
                     st.session_state.global_questions.area == area
                 ].reset_index(drop=True)
-                
+
                 # Store filtered data in session state
                 st.session_state.current_area = area
                 st.session_state.filtered_questions = filtered_questions
-                
+                st.session_state.current_question_idx = 0  # start at first question
+
                 # Move to page 4
                 st.session_state.page = 4
                 st.rerun()
@@ -271,6 +352,7 @@ def render_area_menu():
     if st.button("Souhrn výsledků", use_container_width=True):
         st.session_state.page = 5
         st.rerun()
+
 
 def render_progress():
     if len(st.session_state.filtered_questions) == 0:
@@ -281,7 +363,7 @@ def render_progress():
     current = current_idx + 1  # 1-based
 
     # Window logic: show 20 questions at a time
-    window_size = 20
+    window_size = 25
     window_index = (current - 1) // window_size  # 0 for questions 1–20, 1 for 21–40, etc.
     start = window_index * window_size + 1
     end = min(start + window_size - 1, total)
@@ -298,9 +380,7 @@ def render_progress():
         
         # Find corresponding answer in global_answers by matching question text
         try:
-            global_idx = st.session_state.global_questions[
-                st.session_state.global_questions['question'] == filtered_question['question']
-            ].index[0]
+            global_idx = st.session_state.display_to_global_idx[filtered_question["display_id"]]
             val = st.session_state.global_answers.at[global_idx, "fulfilled"]
             
             # Pick color based on answer
@@ -326,7 +406,8 @@ def render_progress():
         else:
             indicator_html = '<div style="height:24px;"></div>'
 
-        number_html = f"<div style='color:{color}; font-weight:bold;'>{step}</div>"
+        label_num = str(int(filtered_question.get("q_number", step)) + 1 if str(filtered_question.get("q_number", step)).isdigit() else step)
+        number_html = f"<div style='color:{color}; font-weight:bold;'>{label_num}</div>"
 
         tracker_html += (
             "<div style='flex:1; text-align:center;'>"
@@ -378,9 +459,7 @@ def render_questions():
             with col2:
                 if st.button("Jsem si plně vědom/á a uplatňujeme", 
                            key=f"btn1_{current_idx}", use_container_width=True):
-                    question_idx = st.session_state.global_questions[
-                        st.session_state.global_questions['question'] == question['question']
-                    ].index[0]
+                    question_idx = st.session_state.display_to_global_idx[question["display_id"]]
                     st.session_state.global_answers.at[question_idx, 'fulfilled'] = 1.0
                     st.session_state.global_answers.at[question_idx, 'awareness'] = 1.0
                     save_global_progress()
@@ -392,9 +471,7 @@ def render_questions():
                     
                 if st.button("Jsem si vědom/á a částečně uplatňujeme", 
                            key=f"btn2_{current_idx}", use_container_width=True):
-                    question_idx = st.session_state.global_questions[
-                        st.session_state.global_questions['question'] == question['question']
-                    ].index[0]
+                    question_idx = st.session_state.display_to_global_idx[question["display_id"]]
                     st.session_state.global_answers.at[question_idx, 'fulfilled'] = 0.5
                     st.session_state.global_answers.at[question_idx, 'awareness'] = 1.0
                     save_global_progress()
@@ -406,9 +483,7 @@ def render_questions():
                     
                 if st.button("Jsem si vědom/á, ale neuplatňujeme", 
                            key=f"btn3_{current_idx}", use_container_width=True):
-                    question_idx = st.session_state.global_questions[
-                        st.session_state.global_questions['question'] == question['question']
-                    ].index[0]
+                    question_idx = st.session_state.display_to_global_idx[question["display_id"]]
                     st.session_state.global_answers.at[question_idx, 'fulfilled'] = 0.0
                     st.session_state.global_answers.at[question_idx, 'awareness'] = 1.0
                     save_global_progress()
@@ -420,9 +495,7 @@ def render_questions():
                     
                 if st.button("Nejsem si vědom/á a neuplatňujeme", 
                            key=f"btn4_{current_idx}", use_container_width=True):
-                    question_idx = st.session_state.global_questions[
-                        st.session_state.global_questions['question'] == question['question']
-                    ].index[0]
+                    question_idx = st.session_state.display_to_global_idx[question["display_id"]]
                     st.session_state.global_answers.at[question_idx, 'fulfilled'] = 0.0
                     st.session_state.global_answers.at[question_idx, 'awareness'] = 0.0
                     save_global_progress()
@@ -434,11 +507,9 @@ def render_questions():
                     
                 if st.button("Nejsem si jistý/á", 
                            key=f"btn5_{current_idx}", use_container_width=True):
-                    question_idx = st.session_state.global_questions[
-                        st.session_state.global_questions['question'] == question['question']
-                    ].index[0]
-                    st.session_state.global_answers.at[question_idx, 'fulfilled'] = np.nan
-                    st.session_state.global_answers.at[question_idx, 'awareness'] = np.nan
+                    question_idx = st.session_state.display_to_global_idx[question["display_id"]]
+                    st.session_state.global_answers.at[question_idx, 'fulfilled'] = 0.0
+                    st.session_state.global_answers.at[question_idx, 'awareness'] = 0.0
                     save_global_progress()
                     st.session_state.current_question_idx += 1
                     if st.session_state.current_question_idx >= total_questions:
@@ -587,11 +658,14 @@ def render_summary():
         now  = datetime.datetime.now()
         fn   = f"{safe}_audit_{now:%Y%m%d_%H%M%S}.csv"
         os.makedirs("answers_logs",exist_ok=True)
-        out = df.copy()
+        cols = ["area","q_number","display_id","question","weight_fulfilled","weight_awareness"]
+        if "area_question_number" in df.columns:
+            cols.insert(1, "area_question_number")  # include raw numeric if present
+        out = df[cols].copy()
         out["answer_fulfilled"] = a.fulfilled
         out["answer_awareness"]  = a.awareness
-        path = Path("answers_logs")/fn
-        out.to_csv(path,index=False)
+        path = Path("answers_logs") / fn
+        out.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
         st.success(f"Uloženo: {path}")
         
         # Log percentiles
