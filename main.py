@@ -300,7 +300,19 @@ def render_area_menu():
     if "area" not in st.session_state.global_questions.columns or st.session_state.global_questions.empty:
         st.warning("V datovém souboru nejsou žádné oblasti.")
         return
-    areas = pd.Index(st.session_state.global_questions["area"].dropna()).unique().tolist()
+    # Order areas by their first appearance in the CSV (via min global_question_number)
+    if "global_question_number" in st.session_state.global_questions.columns:
+        gq = st.session_state.global_questions.copy()
+        gq["__gqn"] = pd.to_numeric(gq["global_question_number"], errors="coerce")
+        order = (
+            gq.groupby("area", as_index=True)["__gqn"]
+            .min()
+            .sort_values(kind="mergesort")  # stable sort
+        )
+        areas = order.index.tolist()
+    else:
+        # Fallback: preserve first occurrence order from the current dataframe
+        areas = list(dict.fromkeys(st.session_state.global_questions["area"].dropna().tolist()))
 
     cols = st.columns(2)
     for i, area in enumerate(areas):
